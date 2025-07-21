@@ -220,6 +220,11 @@ exports.insertDoc = async (req, res) => {
       getIo().emit("productCreated", saved);
       console.log("📡 WebSocket emitted: productCreated event");
     }
+    if (collectionName === "Promotion") {
+      getIo().emit("promotionCreated", saved);
+      console.log("📡 WebSocket emitted: promotionCreated event");
+    }
+
 
     res.status(200).json({
       success: true,
@@ -401,6 +406,11 @@ exports.updateDoc = async (req, res) => {
       getIo().emit("productUpdated", updated);
       console.log("📡 WebSocket emitted: productUpdated event");
     }
+    if (collectionName === "Promotion") {
+      getIo().emit("promotionUpdated", updated);
+      console.log("📡 WebSocket emitted: promotionUpdated event");
+    }
+
 
     return res
       .status(200)
@@ -469,6 +479,11 @@ exports.deleteDoc = async (req, res) => {
       getIo().emit("productDeleted", id);
       console.log("📡 WebSocket emitted: productDeleted event");
     }
+    if (collectionName === "Promotion") {
+      getIo().emit("promotionDeleted", id);
+      console.log("📡 WebSocket emitted: promotionDeleted event");
+    }
+
 
     res
       .status(200)
