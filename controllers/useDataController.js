@@ -278,7 +278,7 @@ exports.updateDoc = async (req, res) => {
           .json({ message: "Permission denied: not your order" });
       }
 
-      if (updateData.status && updateData.status === "got_product") {
+      if (updateData.status && updateData.status === "got product") {
         updateData.gotProductAt = new Date();
         const updated = await model.findByIdAndUpdate(id, updateData, {
           new: true,
