@@ -25,6 +25,11 @@ app.use('/api/public', require('./routes/publicRoute'));
 app.use('/api/customer-auth', require('./routes/customerAuth')); // Customer specific auth routes
 app.use('/api/phone', require('./routes/passwordReset')); // Phone-based password reset
 
+
+// Dashboard route
+app.use('/api/dashboard', require('./routes/dashboardRoutes'));
+
+
 // Protected Routes (auth required)
 app.use('/api/live-location', require('./middleware/requireLogin'), require('./routes/liveLocation'));
 app.use('/api/order', require('./middleware/requireLogin'), require('./routes/order'));
