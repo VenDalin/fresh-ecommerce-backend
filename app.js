@@ -5,6 +5,7 @@ const path = require('path');
 const mongoose = require('mongoose');
 const dotenv = require('dotenv');
 const socket = require('./socket'); // ✅ your socket.js file
+const geocodeRoute = require('./routes/geocode');
 dotenv.config();
 
 const app = express();
@@ -19,12 +20,14 @@ app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
-// Public Routes (no auth required) - These must be before the catch-all route
+// Public Routes (no auth required)
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/public', require('./routes/publicRoute'));
-app.use('/api/customer-auth', require('./routes/customerAuth')); // Customer specific auth routes
-app.use('/api/phone', require('./routes/passwordReset')); // Phone-based password reset
+app.use('/api/customer-auth', require('./routes/customerAuth'));
+app.use('/api/phone', require('./routes/passwordReset'));
 
+// Geocode Route (should be public)
+app.use(geocodeRoute);
 
 // Protected Routes (auth required)
 app.use('/api/live-location', require('./middleware/requireLogin'), require('./routes/liveLocation'));

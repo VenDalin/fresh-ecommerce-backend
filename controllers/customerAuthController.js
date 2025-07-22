@@ -586,7 +586,10 @@ exports.sendOtp = async (req, res) => {
         .verifications
         .create({ to: phoneNumberWithPrefix, channel: 'sms' });
       
-      console.log(`Verification initiated for ${phoneNumberWithPrefix}, SID: ${verification.sid}`);
+      if (process.env.NODE_ENV === 'development') {
+        console.log(`Verification initiated for ${phoneNumberWithPrefix}, SID: ${verification.sid}`);
+        console.log('Verification Status:', verification.status);
+      }
       
       // Store the phone number in a JWT for the next step
       const verificationId = jwt.sign(

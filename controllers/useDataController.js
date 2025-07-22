@@ -254,8 +254,21 @@ exports.updateDoc = async (req, res) => {
     if (collectionName === "User") {
       const user = await model.findById(id);
       if (!user) return res.status(404).json({ message: "User not found" });
+
       // Special case: allow customers to update their own user document
       if (req.user.role === "customer" && user._id.toString() === req.user._id.toString()) {
+        // If only updating location, skip password logic
+        const locationOnlyUpdate =
+          Object.keys(updateData).every(key =>
+            ["latitude", "longitude", "isLocationUpdate"].includes(key)
+          );
+
+        if (locationOnlyUpdate) {
+          const updated = await model.findByIdAndUpdate(id, updateData, { new: true, runValidators: true });
+          return res.status(200).json({ message: `User location updated`, data: updated });
+        }
+
+        // Otherwise, handle password update if present
         if (updateData.password) {
           updateData.password = await hashPassword(updateData.password);
         }

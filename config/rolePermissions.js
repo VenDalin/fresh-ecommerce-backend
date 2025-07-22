@@ -130,6 +130,7 @@ module.exports = {
 
     PERMISSIONS.READ_CURRENCY,
     PERMISSIONS.UPDATE_USER,
+    PERMISSIONS.READ_USER,
 
   ]
 };
