@@ -12,28 +12,48 @@ const twilioClient = twilio(
 // Use Twilio's Verify service for OTP
 const verifyServiceSid = process.env.TWILIO_VERIFY_SERVICE_SID;
 
+// Helper function to format phone number to E.164 format
+const formatPhoneNumber = (phoneNumber) => {
+  // Remove all non-digit characters
+  let cleaned = phoneNumber.replace(/\D/g, '');
+  
+  // Handle Cambodian phone numbers
+  if (cleaned.startsWith('0')) {
+    // Convert local format (0XX XXX XXX) to international (+855XX XXX XXX)
+    return '+855' + cleaned.substring(1);
+  } else if (cleaned.startsWith('855')) {
+    // Already has country code, just add +
+    return '+' + cleaned;
+  } else if (!cleaned.startsWith('+')) {
+    // Assume it's a local number without leading 0
+    return '+855' + cleaned;
+  }
+  
+  return cleaned.startsWith('+') ? cleaned : '+' + cleaned;
+};
+
+// Helper function to get display format from E.164
+const getDisplayFormat = (e164Number) => {
+  if (e164Number.startsWith('+855')) {
+    return '0' + e164Number.substring(4);
+  }
+  return e164Number;
+};
 
 exports.register = async (req, res) => {
   try {
     const { phoneNumber, password, resetToken } = req.body;
 
     if (!phoneNumber || !password) {
-      return res.status(400).json({ success: false, message: 'Phone number and password are required' });
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Phone number and password are required' 
+      });
     }
 
-    // Format the phone number to E.164 format for storage
-    let formattedPhone = phoneNumber;
-    // Remove non-digits
-    formattedPhone = formattedPhone.replace(/\D/g, '');
-    
-    // Format to E.164
-    if (formattedPhone.startsWith('0')) {
-      formattedPhone = '+855' + formattedPhone.substring(1);
-    } else if (!formattedPhone.startsWith('+') && !formattedPhone.startsWith('855')) {
-      formattedPhone = '+855' + formattedPhone;
-    } else if (formattedPhone.startsWith('855')) {
-      formattedPhone = '+' + formattedPhone;
-    }
+    // Format the phone number to E.164 format
+    const formattedPhone = formatPhoneNumber(phoneNumber);
+    const displayPhone = getDisplayFormat(formattedPhone);
     
     // If resetToken is provided, verify it (for registration after OTP verification)
     if (resetToken) {
@@ -61,52 +81,50 @@ exports.register = async (req, res) => {
     const existingUser = await User.findOne({ 
       $or: [
         { phoneNumber: formattedPhone },
-        { displayPhoneNumber: phoneNumber }
+        { displayPhoneNumber: displayPhone }
       ]
     });
     
     if (existingUser) {
-      return res.status(400).json({ success: false, message: 'Phone number already registered' });
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Phone number already registered' 
+      });
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    // Store the original format in displayPhoneNumber
+    // Create new user
     const user = new User({
       phoneNumber: formattedPhone,
-      displayPhoneNumber: phoneNumber,  // Store the original format
+      displayPhoneNumber: displayPhone,
       password: hashedPassword,
       role: 'customer',
-      isVerified: true  // Mark as verified for immediate access
+      isVerified: true,
+      permissions: ['read_stock'] // Set default permissions
     });
 
     await user.save();
-    
-    // Ensure user has the read_stock permission before creating the token
-    if (user.permissions && !user.permissions.includes('read_stock')) {
-      user.permissions.push('read_stock');
-      await user.save();
-    }
 
-    // Generate token with sufficient expiry - include permissions in token
+    // Generate token with permissions
     const token = jwt.sign(
       { _id: user._id, role: user.role, permissions: user.permissions },
       process.env.JWT_SECRET || 'default_secret',
-      { expiresIn: '30d' }  // Longer expiry for better user experience
+      { expiresIn: '30d' }
     );
 
     // Save token to user document
     user.token = token;
     await user.save();
 
-    // Prepare safe user object to return - include permissions
+    // Prepare safe user object to return
     const userSafe = {
       _id: user._id,
       phoneNumber: user.phoneNumber,
-      displayPhoneNumber: user.displayPhoneNumber,  // Include the display format
+      displayPhoneNumber: user.displayPhoneNumber,
       role: user.role,
       isVerified: user.isVerified,
-      permissions: user.permissions || [] // Make sure permissions are included
+      permissions: user.permissions || []
     };
 
     res.status(201).json({
@@ -114,21 +132,22 @@ exports.register = async (req, res) => {
       message: 'Registration successful. You are now logged in!',
       user: userSafe,
       token,
-      autoLogin: true  // Signal to frontend that user is automatically logged in
+      autoLogin: true
     });
   } catch (err) {
     console.error('Registration error:', err);
-    res.status(500).json({ success: false, message: 'Server error during registration' });
+    res.status(500).json({ 
+      success: false, 
+      message: 'Server error during registration' 
+    });
   }
 };
-
-
 
 exports.login = async (req, res) => {
   try {
     const { displayPhoneNumber, password } = req.body;
     
-    console.log('Login attempt:', { displayPhoneNumber }); // Debug log
+    console.log('Login attempt:', { displayPhoneNumber });
     
     if (!displayPhoneNumber || !password) {
       return res.status(400).json({ 
@@ -137,69 +156,41 @@ exports.login = async (req, res) => {
       });
     }
 
-    // Try to find user with the exact input format first
-    let user = await User.findOne({ 
+    // Format the input phone number
+    const formattedPhone = formatPhoneNumber(displayPhoneNumber);
+    const displayPhone = getDisplayFormat(formattedPhone);
+
+    // Find user with multiple format attempts
+    const user = await User.findOne({ 
       $or: [
-        { displayPhoneNumber },
-        { phoneNumber: displayPhoneNumber }
+        { displayPhoneNumber: displayPhoneNumber },
+        { phoneNumber: displayPhoneNumber },
+        { phoneNumber: formattedPhone },
+        { displayPhoneNumber: displayPhone }
       ]
     }).select('+password +role +permissions');
     
-    console.log('User lookup result:', user ? 'Found' : 'Not found');
-    
-    // If not found, try with the phoneNumber
     if (!user) {
-      user = await User.findOne({ phoneNumber: displayPhoneNumber }).select('+role +password');
-      if (user) console.log('Found user by phoneNumber');
-    }
-    
-    // If still not found, try formatting the number to E.164 and search again
-    if (!user) {
-      // Format number to E.164
-      let formattedNumber = displayPhoneNumber;
-      
-      // Remove non-digits
-      formattedNumber = formattedNumber.replace(/\D/g, '');
-      
-      // Convert local format to international
-      if (formattedNumber.startsWith('0')) {
-        formattedNumber = '+855' + formattedNumber.substring(1);
-      } else if (!formattedNumber.startsWith('+') && !formattedNumber.startsWith('855')) {
-        formattedNumber = '+855' + formattedNumber;
-      } else if (formattedNumber.startsWith('855')) {
-        formattedNumber = '+' + formattedNumber;
-      }
-      
-      console.log(`Trying formatted number: ${formattedNumber}`);
-      user = await User.findOne({ phoneNumber: formattedNumber }).select('+role +password');
-      if (user) console.log('Found user by formatted phoneNumber');
-    }
-
-    if (!user) {
-      console.log('No user found with any phone number format');
-      return res.status(401).json({ message: 'User not found' });
-    }
-
-    try {
-      const isMatch = await bcrypt.compare(password, user.password);
-      if (!isMatch) {
-        return res.status(401).json({ 
-          success: false, 
-          message: 'Invalid credentials. Please check your password and try again.' 
-        });
-      }
-    } catch (error) {
-      console.error('Password comparison error:', error);
-      return res.status(500).json({ 
+      console.log('No user found with phone number:', displayPhoneNumber);
+      return res.status(401).json({ 
         success: false, 
-        message: 'Error verifying password. Please try again.' 
+        message: 'Invalid credentials' 
+      });
+    }
+
+    // Verify password
+    const isMatch = await bcrypt.compare(password, user.password);
+    if (!isMatch) {
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Invalid credentials' 
       });
     }
 
     // Ensure customer user has read_stock permission
-    if (user.role === 'customer' && user.permissions && !user.permissions.includes('read_stock')) {
+    if (user.role === 'customer' && (!user.permissions || !user.permissions.includes('read_stock'))) {
+      if (!user.permissions) user.permissions = [];
       user.permissions.push('read_stock');
-      // Save will be done below after setting token
     }
     
     const token = jwt.sign(
@@ -208,7 +199,7 @@ exports.login = async (req, res) => {
       { expiresIn: '7d' }
     );
 
-    // ✅ Store token in DB
+    // Store token in DB
     user.token = token;
     await user.save();
 
@@ -218,52 +209,364 @@ exports.login = async (req, res) => {
       displayPhoneNumber: user.displayPhoneNumber,
       role: user.role,
       isVerified: user.isVerified,
-      permissions: user.permissions || [] // Include permissions
+      permissions: user.permissions || []
     };
 
     res.status(200).json({
+      success: true,
       message: 'Login successful',
       user: userSafe,
       token
     });
   } catch (err) {
     console.error('Login error:', err);
-    res.status(500).json({ message: 'Server error' });
+    res.status(500).json({ 
+      success: false, 
+      message: 'Server error' 
+    });
   }
 };
 
-
 exports.logout = async (req, res) => {
   try {
-    const token = req.headers.authorization?.split(' ')[1]
-    if (!token) return res.status(401).json({ message: 'Token missing' })
+    const token = req.headers.authorization?.split(' ')[1];
+    if (!token) {
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Token missing' 
+      });
+    }
 
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'default_secret')
-    const user = await User.findById(decoded._id)
-    if (!user) return res.status(404).json({ message: 'User not found' })
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'default_secret');
+    const user = await User.findById(decoded._id);
+    if (!user) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'User not found' 
+      });
+    }
 
-    user.token = null
-    await user.save()
+    user.token = null;
+    await user.save();
 
-    // Send instruction to client to clear localStorage
     res.status(200).json({
+      success: true,
       message: 'Logged out successfully',
       clearLocalStorage: true
-    })
+    });
   } catch (err) {
-    console.error('Logout error:', err)
-    res.status(500).json({ message: 'Logout failed', error: err.message })
+    console.error('Logout error:', err);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Logout failed', 
+      error: err.message 
+    });
   }
-}
+};
 
+// Send OTP for registration or password reset
+exports.sendOtp = async (req, res) => {
+  try {
+    const { phoneNumber, purpose = 'registration' } = req.body;
+    
+    if (!phoneNumber) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Phone number is required' 
+      });
+    }
 
-// Initiate the password reset process with phone number
+    // Format phone number to E.164
+    const formattedPhone = formatPhoneNumber(phoneNumber);
+    const displayPhone = getDisplayFormat(formattedPhone);
+    
+    console.log(`Sending OTP to: ${formattedPhone} (display: ${displayPhone}) for purpose: ${purpose}`);
+    
+    // Check user existence based on purpose
+    const existingUser = await User.findOne({ 
+      $or: [
+        { phoneNumber: formattedPhone },
+        { displayPhoneNumber: displayPhone }
+      ] 
+    });
+    
+    if (purpose === 'registration' && existingUser) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Phone number already registered' 
+      });
+    }
+    
+    if (purpose === 'password_reset' && !existingUser) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'No account found with this phone number' 
+      });
+    }
+    
+    try {
+      // Send OTP using Twilio Verify service
+      const verification = await twilioClient.verify.v2
+        .services(verifyServiceSid)
+        .verifications
+        .create({ 
+          to: formattedPhone, 
+          channel: 'sms',
+          locale: 'en' // You can change this to 'km' for Khmer if supported
+        });
+      
+      console.log(`Verification initiated for ${formattedPhone}:`, {
+        sid: verification.sid,
+        status: verification.status,
+        channel: verification.channel
+      });
+      
+      // Create verification ID for tracking
+      const verificationId = jwt.sign(
+        { 
+          phoneNumber: formattedPhone,
+          displayPhoneNumber: displayPhone,
+          purpose: purpose,
+          verificationSid: verification.sid // Store Twilio's verification SID
+        },
+        process.env.JWT_SECRET || 'default_secret',
+        { expiresIn: '10m' }
+      );
+      
+      res.json({ 
+        success: true, 
+        message: 'Verification code sent successfully',
+        verificationId,
+        // Don't expose these in production
+        ...(process.env.NODE_ENV === 'development' && {
+          debug: {
+            formattedPhone,
+            verificationSid: verification.sid,
+            status: verification.status
+          }
+        })
+      });
+      
+    } catch (twilioError) {
+      console.error('Twilio Verify error:', {
+        message: twilioError.message,
+        code: twilioError.code,
+        status: twilioError.status
+      });
+      
+      // Handle specific Twilio errors
+      let errorMessage = 'Failed to send verification code';
+      
+      switch (twilioError.code) {
+        case 60200:
+          errorMessage = 'Invalid phone number format';
+          break;
+        case 60203:
+          errorMessage = 'Phone number is not a valid mobile number';
+          break;
+        case 60205:
+          errorMessage = 'SMS not supported for this phone number';
+          break;
+        case 60212:
+          errorMessage = 'Too many attempts. Please try again later';
+          break;
+        default:
+          if (process.env.NODE_ENV === 'development') {
+            errorMessage = `Twilio error: ${twilioError.message}`;
+          }
+      }
+      
+      return res.status(400).json({ 
+        success: false, 
+        message: errorMessage,
+        ...(process.env.NODE_ENV === 'development' && {
+          twilioError: {
+            code: twilioError.code,
+            message: twilioError.message
+          }
+        })
+      });
+    }
+    
+  } catch (err) {
+    console.error('Error initiating verification:', err);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to initiate verification' 
+    });
+  }
+};
+
+// Verify OTP for registration
+exports.verifyOtp = async (req, res) => {
+  try {
+    const { verificationId, otp, password } = req.body;
+    
+    if (!verificationId || !otp) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Verification ID and OTP are required' 
+      });
+    }
+    
+    // Decode the verificationId
+    let decodedToken;
+    try {
+      decodedToken = jwt.verify(verificationId, process.env.JWT_SECRET || 'default_secret');
+    } catch (error) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Invalid or expired verification session' 
+      });
+    }
+    
+    const { phoneNumber, displayPhoneNumber, purpose } = decodedToken;
+    
+    // For registration, password is required
+    if (purpose === 'registration' && !password) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Password is required for registration' 
+      });
+    }
+    
+    try {
+      // Verify OTP with Twilio
+      const verificationCheck = await twilioClient.verify.v2
+        .services(verifyServiceSid)
+        .verificationChecks
+        .create({ 
+          to: phoneNumber, 
+          code: otp 
+        });
+      
+      console.log('Verification check result:', {
+        status: verificationCheck.status,
+        valid: verificationCheck.valid
+      });
+      
+      if (verificationCheck.status !== 'approved') {
+        return res.status(400).json({ 
+          success: false, 
+          message: 'Invalid or expired verification code' 
+        });
+      }
+      
+      // Handle different purposes
+      if (purpose === 'registration') {
+        // Check if user already exists (double check)
+        const existingUser = await User.findOne({ 
+          $or: [
+            { phoneNumber: phoneNumber },
+            { displayPhoneNumber: displayPhoneNumber }
+          ]
+        });
+        
+        if (existingUser) {
+          return res.status(400).json({ 
+            success: false, 
+            message: 'Phone number already registered' 
+          });
+        }
+        
+        // Create new user
+        const hashedPassword = await bcrypt.hash(password, 10);
+        
+        const user = new User({
+          phoneNumber: phoneNumber,
+          displayPhoneNumber: displayPhoneNumber,
+          password: hashedPassword,
+          role: 'customer',
+          isVerified: true,
+          permissions: ['read_stock']
+        });
+        
+        await user.save();
+        
+        // Generate JWT token
+        const token = jwt.sign(
+          { _id: user._id, role: user.role, permissions: user.permissions },
+          process.env.JWT_SECRET || 'default_secret',
+          { expiresIn: '30d' }
+        );
+
+        // Store token in user document
+        user.token = token;
+        await user.save();
+
+        const userSafe = {
+          _id: user._id,
+          phoneNumber: user.phoneNumber,
+          displayPhoneNumber: user.displayPhoneNumber,
+          role: user.role,
+          isVerified: user.isVerified,
+          permissions: user.permissions || []
+        };
+
+        return res.json({ 
+          success: true, 
+          message: 'Phone verified and user registered successfully',
+          user: userSafe,
+          token,
+          autoLogin: true
+        });
+        
+      } else if (purpose === 'password_reset') {
+        // For password reset, create a confirmed reset token
+        const resetToken = jwt.sign(
+          { 
+            phoneNumber: phoneNumber,
+            purpose: 'password_reset_confirmed'
+          },
+          process.env.JWT_SECRET || 'default_secret',
+          { expiresIn: '15m' }
+        );
+        
+        return res.json({ 
+          success: true, 
+          message: 'Phone verified successfully. You can now reset your password.',
+          resetToken
+        });
+      }
+      
+    } catch (twilioError) {
+      console.error('Verification check error:', twilioError);
+      
+      let errorMessage = 'Failed to verify code';
+      
+      switch (twilioError.code) {
+        case 20404:
+          errorMessage = 'Verification code has expired or is invalid';
+          break;
+        case 60202:
+          errorMessage = 'Maximum check attempts reached';
+          break;
+        default:
+          if (process.env.NODE_ENV === 'development') {
+            errorMessage = `Twilio error: ${twilioError.message}`;
+          }
+      }
+      
+      return res.status(400).json({ 
+        success: false, 
+        message: errorMessage
+      });
+    }
+    
+  } catch (err) {
+    console.error('OTP verification error:', err);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Server error during verification'
+    });
+  }
+};
+
+// Initiate password reset with phone number (alternative to sendOtp for password reset)
 exports.forgotPassword = async (req, res) => {
   try {
     const { phoneNumber } = req.body;
     
-    console.log(`Received forgot password request for phone: ${phoneNumber}`);
-
     if (!phoneNumber) {
       return res.status(400).json({
         success: false,
@@ -271,61 +574,20 @@ exports.forgotPassword = async (req, res) => {
       });
     }
 
-    // Find the user with this phone number
-    const user = await User.findOne({ 
-      $or: [
-        { phoneNumber },
-        { displayPhoneNumber: phoneNumber.replace('+855', '0') }
-      ] 
-    });
-
-    if (!user) {
-      console.log(`No user found with phone number: ${phoneNumber}`);
-      return res.status(404).json({
-        success: false,
-        message: 'No account found with this phone number'
-      });
-    }
-
-    console.log(`User found: ${user.name}, creating OTP`);
-
-    // Generate a random 6-digit OTP
-    const otp = '123456'; // Fixed OTP for testing
+    // Use the sendOtp function for consistency
+    req.body.purpose = 'password_reset';
+    return exports.sendOtp(req, res);
     
-    // Store OTP in user's document with expiry
-    user.resetPasswordOtp = otp;
-    user.resetPasswordOtpExpiry = Date.now() + 30 * 60 * 1000; // 30 minutes (extended for testing)
-    await user.save();
-    
-    console.log(`DEBUG MODE: OTP for ${phoneNumber} is ${otp}`);
-    
-    // Create a verification ID to track this reset process
-    const resetVerificationId = jwt.sign(
-      { 
-        phoneNumber, 
-        purpose: 'password_reset' 
-      },
-      process.env.JWT_SECRET || 'default_secret',
-      { expiresIn: '30m' }
-    );
-
-    return res.status(200).json({
-      success: true,
-      message: 'Password reset OTP sent to your phone',
-      verificationId: resetVerificationId
-    });
   } catch (err) {
     console.error('Password reset initiation failed:', err);
     return res.status(500).json({
       success: false,
-      message: 'Failed to initiate password reset',
-      error: process.env.NODE_ENV === 'development' ? err.message : undefined
+      message: 'Failed to initiate password reset'
     });
   }
 };
 
-
-// Verify OTP and update password
+// Verify OTP and update password (combined function)
 exports.verifyPasswordResetOtp = async (req, res) => {
   try {
     const { verificationId, otp, newPassword } = req.body;
@@ -344,99 +606,46 @@ exports.verifyPasswordResetOtp = async (req, res) => {
       });
     }
 
-    // Verify the verification ID
-    let decoded;
-    try {
-      decoded = jwt.verify(verificationId, process.env.JWT_SECRET || 'default_secret');
-    } catch (error) {
-      console.error('Reset session expired or invalid:', error);
-      return res.status(401).json({
-        success: false,
-        message: 'Reset session expired or invalid. Please restart the password reset process.'
-      });
-    }
-
-    // Check if this token was meant for password reset
-    if (decoded.purpose !== 'password_reset') {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid verification token purpose'
-      });
-    }
-
-    const phoneNumber = decoded.phoneNumber;
-
-    // Find user with the phone number
-    const user = await User.findOne({
-      $or: [
-        { phoneNumber },
-        { displayPhoneNumber: phoneNumber.replace('+855', '0') }
-      ]
+    // First verify the OTP
+    const verifyResult = await new Promise((resolve) => {
+      const mockReq = { body: { verificationId, otp } };
+      const mockRes = {
+        json: (data) => resolve(data),
+        status: (code) => ({ json: (data) => resolve({ ...data, statusCode: code }) })
+      };
+      exports.verifyOtp(mockReq, mockRes);
     });
 
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'User not found'
-      });
+    if (!verifyResult.success) {
+      return res.status(verifyResult.statusCode || 400).json(verifyResult);
     }
 
-    // Verify OTP
-    if (!user.resetPasswordOtp || user.resetPasswordOtp !== otp) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid or expired OTP code'
-      });
+    // If verification successful and we have a resetToken, proceed with password reset
+    if (verifyResult.resetToken) {
+      const resetReq = { 
+        body: { 
+          resetToken: verifyResult.resetToken, 
+          newPassword 
+        } 
+      };
+      return exports.resetPassword(resetReq, res);
     }
 
-    // Check OTP expiry
-    if (!user.resetPasswordOtpExpiry || user.resetPasswordOtpExpiry < Date.now()) {
-      return res.status(400).json({
-        success: false,
-        message: 'OTP has expired. Please request a new one.'
-      });
-    }
-
-    // Update password
-    user.password = newPassword;
-    user.resetPasswordOtp = undefined;
-    user.resetPasswordOtpExpiry = undefined;
-    await user.save();
-
-    // Generate new authentication token
-    const token = jwt.sign(
-      { _id: user._id, role: user.role },
-      process.env.JWT_SECRET || 'default_secret',
-      { expiresIn: '7d' }
-    );
-
-    // Save token to database
-    user.token = token;
-    await user.save();
-
-    res.json({
-      success: true,
-      message: 'Password reset successfully',
-      token,
-      user: {
-        _id: user._id,
-        name: user.name,
-        displayPhoneNumber: user.displayPhoneNumber,
-        role: user.role,
-        isVerified: user.isVerified
-      }
+    return res.status(400).json({
+      success: false,
+      message: 'Invalid verification result'
     });
+
   } catch (err) {
-    console.error('OTP verification failed:', err);
+    console.error('Password reset verification failed:', err);
     res.status(500).json({
       success: false,
-      message: 'Verification failed due to a server error',
-      error: process.env.NODE_ENV === 'development' ? err.message : undefined
+      message: 'Verification failed due to a server error'
     });
   }
 };
 
-// Reset password with verified OTP
+// Reset password with verified token
 exports.resetPassword = async (req, res) => {
   try {
     const { resetToken, newPassword } = req.body;
@@ -460,28 +669,26 @@ exports.resetPassword = async (req, res) => {
     try {
       decoded = jwt.verify(resetToken, process.env.JWT_SECRET || 'default_secret');
     } catch (error) {
-      console.error('Reset session expired or invalid:', error);
       return res.status(401).json({ 
         success: false, 
-        message: 'Reset session expired or invalid. Please restart the password reset process.' 
+        message: 'Reset session expired or invalid' 
       });
     }
     
-    // Check if this token was meant for confirmed password reset
     if (decoded.purpose !== 'password_reset_confirmed') {
       return res.status(400).json({ 
         success: false, 
-        message: 'Invalid reset token purpose' 
+        message: 'Invalid reset token' 
       });
     }
     
     const phoneNumber = decoded.phoneNumber;
     
-    // Find user with the phone number
+    // Find user
     const user = await User.findOne({ 
       $or: [
         { phoneNumber: phoneNumber },
-        { displayPhoneNumber: phoneNumber.replace('+855', '0') }
+        { displayPhoneNumber: getDisplayFormat(phoneNumber) }
       ] 
     });
     
@@ -492,18 +699,18 @@ exports.resetPassword = async (req, res) => {
       });
     }
     
-    // Update password (don't hash manually, let model middleware handle it)
-    user.password = newPassword;
+    // Update password
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+    user.password = hashedPassword;
     await user.save();
     
     // Generate new authentication token
     const token = jwt.sign(
-      { _id: user._id, role: user.role },
+      { _id: user._id, role: user.role, permissions: user.permissions },
       process.env.JWT_SECRET || 'default_secret',
       { expiresIn: '7d' }
     );
     
-    // Save token to database
     user.token = token;
     await user.save();
     
@@ -516,254 +723,15 @@ exports.resetPassword = async (req, res) => {
         name: user.name,
         displayPhoneNumber: user.displayPhoneNumber,
         role: user.role,
-        isVerified: user.isVerified
+        isVerified: user.isVerified,
+        permissions: user.permissions
       }
     });
   } catch (err) {
     console.error('Password reset failed:', err);
     res.status(500).json({ 
       success: false, 
-      message: 'Password reset failed',
-      error: process.env.NODE_ENV === 'development' ? err.message : undefined
-    });
-  }
-}
-
-// Send OTP for registration or verification
-exports.sendOtp = async (req, res) => {
-  try {
-    const { phoneNumber, purpose } = req.body;
-    const otpPurpose = purpose || 'registration';
-    
-    if (!phoneNumber) {
-      return res.status(400).json({ success: false, message: 'Phone number is required' });
-    }
-
-    // Format phone number correctly for international format
-    let phoneNumberWithPrefix = phoneNumber.startsWith('+') ? phoneNumber : `+${phoneNumber}`;
-    
-    // Handle Cambodian numbers without country code
-    if (!phoneNumberWithPrefix.startsWith('+')) {
-      if (phoneNumberWithPrefix.startsWith('0')) {
-        phoneNumberWithPrefix = '+855' + phoneNumberWithPrefix.substring(1);
-      } else if (!phoneNumberWithPrefix.startsWith('855')) {
-        phoneNumberWithPrefix = '+855' + phoneNumberWithPrefix;
-      } else {
-        phoneNumberWithPrefix = '+' + phoneNumberWithPrefix;
-      }
-    }
-    
-    // Check if user already exists with this phone number (only for registration)
-    if (otpPurpose === 'registration') {
-      const existingUser = await User.findOne({ 
-        $or: [
-          { phoneNumber: phoneNumberWithPrefix },
-          { displayPhoneNumber: phoneNumber }
-        ] 
-      });
-      
-      if (existingUser) {
-        return res.status(400).json({ success: false, message: 'Phone number already registered' });
-      }
-    } else if (otpPurpose === 'reset_password') {
-      // For password reset, ensure the user exists
-      const existingUser = await User.findOne({ 
-        $or: [
-          { phoneNumber: phoneNumberWithPrefix },
-          { displayPhoneNumber: phoneNumber }
-        ] 
-      });
-      
-      if (!existingUser) {
-        return res.status(404).json({ success: false, message: 'No account found with this phone number' });
-      }
-    }
-    
-    try {
-      // Generate a verification code via Twilio Verify
-      const verification = await twilioClient.verify.v2
-        .services(verifyServiceSid)
-        .verifications
-        .create({ to: phoneNumberWithPrefix, channel: 'sms' });
-      
-      if (process.env.NODE_ENV === 'development') {
-        console.log(`Verification initiated for ${phoneNumberWithPrefix}, SID: ${verification.sid}`);
-        console.log('Verification Status:', verification.status);
-      }
-      
-      // Store the phone number in a JWT for the next step
-      const verificationId = jwt.sign(
-        { 
-          phoneNumber: phoneNumberWithPrefix,
-          purpose: purpose || 'registration' // Track the purpose of the OTP
-        },
-        process.env.JWT_SECRET || 'default_secret',
-        { expiresIn: '10m' }
-      );
-      
-      res.json({ 
-        success: true, 
-        message: 'Verification code sent successfully',
-        verificationId
-      });
-    } catch (error) {
-      console.error('Twilio Verify error:', error);
-      
-      // For debugging in development
-      if (process.env.NODE_ENV === 'development') {
-        return res.status(500).json({ 
-          success: false, 
-          message: 'Failed to send verification code',
-          error: error.message,
-          twilioError: error.code || 'Unknown Twilio error'
-        });
-      }
-      
-      res.status(500).json({ 
-        success: false, 
-        message: 'Failed to send verification code'
-      });
-    }
-  } catch (err) {
-    console.error('Error initiating verification:', err);
-    res.status(500).json({ success: false, message: 'Failed to initiate verification' });
-  }
-};
-
-// Verify OTP and register the user
-exports.verifyOtp = async (req, res) => {
-  try {
-    const { verificationId, otp, phoneNumber, password } = req.body;
-    
-    if (!verificationId || !otp || !phoneNumber || !password) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Missing required fields' 
-      });
-    }
-    
-    // Decode the verificationId to get the phone number we sent the OTP to
-    let decodedToken;
-    try {
-      decodedToken = jwt.verify(verificationId, process.env.JWT_SECRET || 'default_secret');
-    } catch (error) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Invalid or expired verification session' 
-      });
-    }
-    
-    // Ensure the phone number matches what was used to send the OTP
-    if (decodedToken.phoneNumber !== phoneNumber) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Phone number mismatch' 
-      });
-    }
-    
-    // Check if OTP is valid using Twilio Verify
-    try {
-      const verificationCheck = await twilioClient.verify.v2
-        .services(verifyServiceSid)
-        .verificationChecks
-        .create({ to: phoneNumber, code: otp });
-      
-      if (verificationCheck.status === 'approved') {
-        // Format phone number for display
-        const originalPhoneNumber = phoneNumber.replace(/^\+855/, '0');
-        
-        // Check if user already exists (double check)
-        const existingUser = await User.findOne({ 
-          $or: [
-            { phoneNumber: phoneNumber },
-            { displayPhoneNumber: originalPhoneNumber }
-          ]
-        });
-        
-        if (existingUser) {
-          return res.status(400).json({ 
-            success: false, 
-            message: 'Phone number already registered' 
-          });
-        }
-        
-        // Create new user - no need to hash password manually, the pre-save hook will do it
-        const { latitude, longitude } = req.body;
-        
-        const user = new User({
-          phoneNumber: phoneNumber,
-          displayPhoneNumber: originalPhoneNumber,
-          password: password, // Will be hashed by the pre-save hook
-          role: 'customer',
-          isVerified: true,
-          latitude: latitude || null,
-          longitude: longitude || null
-        });
-        
-        await user.save();
-        
-        // Ensure user has read_stock permission
-        if (!user.permissions || !user.permissions.includes('read_stock')) {
-          if (!user.permissions) user.permissions = [];
-          user.permissions.push('read_stock');
-          // Will save below after setting token
-        }
-        
-        // Generate JWT token with permissions
-        const token = jwt.sign(
-          { _id: user._id, role: user.role, permissions: user.permissions },
-          process.env.JWT_SECRET || 'default_secret',
-          { expiresIn: '30d' }
-        );
-
-        // Store token in the user document
-        user.token = token;
-        await user.save();
-
-        // Prepare safe user object - ensure all needed fields are included
-        const userSafe = {
-          _id: user._id,
-          phoneNumber: user.phoneNumber,
-          displayPhoneNumber: user.displayPhoneNumber,
-          role: user.role,
-          isVerified: user.isVerified,
-          permissions: user.permissions || [] // Make sure permissions are included
-        };
-
-        res.json({ 
-          success: true, 
-          message: 'Phone verified and user registered successfully',
-          user: userSafe,
-          token,
-          autoLogin: true  // Signal to frontend that user should be automatically logged in
-        });
-      } else {
-        res.status(400).json({ 
-          success: false, 
-          message: 'Invalid verification code', 
-          status: verificationCheck.status 
-        });
-      }
-    } catch (error) {
-      console.error('Verification check error:', error);
-      
-      // Provide more specific error for debugging
-      let errorMessage = 'Failed to verify code';
-      if (error.code === 20404) {
-        errorMessage = 'Verification code has expired or is invalid';
-      }
-      
-      res.status(400).json({ 
-        success: false, 
-        message: errorMessage,
-        code: error.code || null
-      });
-    }
-  } catch (err) {
-    console.error('OTP verification error:', err);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Server error during verification'
+      message: 'Password reset failed'
     });
   }
 };

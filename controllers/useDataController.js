@@ -73,10 +73,6 @@ exports.insertDoc = async (req, res) => {
     const { collectionName } = req.params;
     const docData = req.body.fields;
 
-    console.log("📥 insertDoc called");
-    console.log("📁 Target collection:", collectionName);
-    console.log("📄 Document data:", docData);
-    console.log("👤 Current user:", req.user);
 
     const model = modelMap[collectionName];
     if (!model) {

@@ -1,64 +1,69 @@
-const axios = require('axios');
-const Transaction = require('../models/transactions');
-const System = require('../models/system');
-const { findOrCreateGuestUser } = require('../utils/userHelpers');
+const axios = require("axios");
+const Transaction = require("../models/transactions");
+const System = require("../models/system");
+const { findOrCreateGuestUser } = require("../utils/userHelpers");
+const User = require('../models/user'); // import your User model
 
-const bakongKhqr = require('bakong-khqr');
-const { IndividualInfo } = require('bakong-khqr/src/model/information');
-const { khqrData } = require('bakong-khqr/src/constant');
+const bakongKhqr = require("bakong-khqr");
+const { IndividualInfo } = require("bakong-khqr/src/model/information");
+const { khqrData } = require("bakong-khqr/src/constant");
 
 exports.generateQR = async (req, res) => {
   try {
     const {
       amount,
+      userId, // <-- get userId from payload
       name,
       password,
       currentLocation,
       phoneNumber = null,
-      currency = 'KHR',
+      currency = "KHR",
       accountId = process.env.BAKONG_ACCOUNT_ID,
-      storeLabel = 'Ecommerce',
-      terminalLabel = 'Web Payment',
-      billNumber = `BILL${Math.floor(Math.random() * 10000).toString().padStart(4, '0')}`,
+      storeLabel = "Ecommerce",
+      terminalLabel = "Web Payment",
+      billNumber = `BILL${Math.floor(Math.random() * 10000)
+        .toString()
+        .padStart(4, "0")}`,
       callbackUrl = process.env.QR_SCAN_CALLBACK_URL || null,
       orderId = null,
     } = req.body;
 
-    console.log('Received request data:', {
-      amount,
-      name,
-      currentLocation,
-      phoneNumber,
-      currency,
-      accountId,
-      storeLabel,
-      terminalLabel,
-      billNumber
-    });
-
     // Validation checks
     if (!amount || amount <= 0) {
-      return res.status(400).json({ message: 'Invalid amount' });
+      return res.status(400).json({ message: "Invalid amount" });
     }
     if (!name || !password || !currentLocation) {
-      return res.status(400).json({ message: 'Missing required fields' });
+      return res.status(400).json({ message: "Missing required fields" });
     }
     if (!accountId) {
-      return res.status(500).json({ message: 'Missing BAKONG_ACCOUNT_ID in env or request' });
+      return res
+        .status(500)
+        .json({ message: "Missing BAKONG_ACCOUNT_ID in env or request" });
     }
-    if (!['KHR', 'USD'].includes(currency.toUpperCase())) {
-      return res.status(400).json({ message: 'Invalid currency. Only KHR and USD are supported' });
+    if (!["KHR", "USD"].includes(currency.toUpperCase())) {
+      return res
+        .status(400)
+        .json({ message: "Invalid currency. Only KHR and USD are supported" });
     }
 
-    // Restore guest user logic
-    const guest = await findOrCreateGuestUser({ 
-      name, 
-      phoneNumber: phoneNumber || 'unknown',
-      password, 
-      currentLocation 
-    });
-    const userId = guest._id;
-    const customerId = guest._id;
+    let user;
+    if (userId) {
+      user = await User.findById(userId);
+      if (!user) {
+        return res.status(400).json({ message: 'User not found' });
+      }
+    } else {
+      // Restore guest user logic
+      user = await findOrCreateGuestUser({
+        name,
+        phoneNumber: phoneNumber || "unknown",
+        password,
+        currentLocation,
+      });
+    }
+
+    const realUserId = user._id;
+    const customerId = user._id;
 
     const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
 
@@ -72,14 +77,14 @@ exports.generateQR = async (req, res) => {
         terminalLabel,
         mobileNumber: phoneNumber,
         expirationTimestamp: expiresAt.getTime(),
-        merchantCategoryCode: "5999"
+        merchantCategoryCode: "5999",
       };
 
-      console.log('Creating IndividualInfo with data:', {
+      console.log("Creating IndividualInfo with data:", {
         accountId,
         name,
         currentLocation,
-        ...individualInfoData
+        ...individualInfoData,
       });
 
       const individualInfo = new IndividualInfo(
@@ -89,31 +94,33 @@ exports.generateQR = async (req, res) => {
         individualInfoData
       );
 
-      console.log('IndividualInfo created successfully:', individualInfo);
+      console.log("IndividualInfo created successfully:", individualInfo);
 
       // Create BakongKHQR instance
       const khqr = new bakongKhqr.BakongKHQR();
-      console.log('BakongKHQR instance created');
+      console.log("BakongKHQR instance created");
 
       // Generate QR code
       const response = khqr.generateIndividual(individualInfo);
-      console.log('QR Generation response:', {
+      console.log("QR Generation response:", {
         success: !!response,
         hasData: !!(response && response.data),
-        hasQR: !!(response && response.data && response.data.qr)
+        hasQR: !!(response && response.data && response.data.qr),
       });
 
       if (!response || !response.data || !response.data.qr) {
-        console.error('Invalid QR generation response:', response);
-        throw new Error('Failed to generate QR code data: Invalid response structure');
+        console.error("Invalid QR generation response:", response);
+        throw new Error(
+          "Failed to generate QR code data: Invalid response structure"
+        );
       }
 
       const qrCodeData = response.data.qr;
-      console.log('QR code data generated successfully');
+      console.log("QR code data generated successfully");
 
       // Create transaction record
       const tx = await Transaction.create({
-        userId,
+        userId: realUserId,
         customerId,
         orderId: orderId || null,
         fromAccountId: null,
@@ -122,53 +129,50 @@ exports.generateQR = async (req, res) => {
         currency,
         qrCodeUrl: qrCodeData,
         bakongRefId: billNumber,
-        paymentMethod: 'bakong',
-        transactionType: 'checkout',
-        paymentStatus: 'pending',
+        paymentMethod: "bakong",
+        transactionType: "checkout",
+        paymentStatus: "pending",
         qrExpiresAt: expiresAt,
         status: true,
-        createdBy: userId,
-        callbackUrl: callbackUrl
-      })
-    
+        createdBy: realUserId,
+        callbackUrl: callbackUrl,
+      });
 
-      console.log('Transaction created successfully:', {
+      console.log("Transaction created successfully:", {
         id: tx._id,
         bakongRefId: tx.bakongRefId,
         amount: tx.amount,
-        currency: tx.currency
+        currency: tx.currency,
       });
 
       return res.status(201).json({
-        message: '✅ QR generated successfully',
+        message: "✅ QR generated successfully",
         data: tx,
         expiresAt,
-        callbackUrl: tx.callbackUrl
+        callbackUrl: tx.callbackUrl,
       });
-
     } catch (qrError) {
-      console.error('QR Generation Error Details:', {
+      console.error("QR Generation Error Details:", {
         message: qrError.message,
         stack: qrError.stack,
-        name: qrError.name
+        name: qrError.name,
       });
-      return res.status(500).json({ 
-        message: 'Failed to generate QR code', 
+      return res.status(500).json({
+        message: "Failed to generate QR code",
         error: qrError.message,
-        details: qrError.stack
+        details: qrError.stack,
       });
     }
-
   } catch (err) {
-    console.error('Transaction Error:', {
+    console.error("Transaction Error:", {
       message: err.message,
       stack: err.stack,
-      name: err.name
+      name: err.name,
     });
-    return res.status(500).json({ 
-      message: 'QR generation failed', 
+    return res.status(500).json({
+      message: "QR generation failed",
       error: err.message,
-      details: err.stack
+      details: err.stack,
     });
   }
 };
@@ -178,11 +182,13 @@ exports.getTransaction = async (req, res) => {
     const { id } = req.params;
     const transaction = await Transaction.findById(id);
     if (!transaction) {
-      return res.status(404).json({ message: 'Transaction not found' });
+      return res.status(404).json({ message: "Transaction not found" });
     }
     return res.status(200).json(transaction);
   } catch (err) {
-    return res.status(500).json({ message: 'Failed to get transaction', error: err.message });
+    return res
+      .status(500)
+      .json({ message: "Failed to get transaction", error: err.message });
   }
 };
 
@@ -194,17 +200,19 @@ exports.handleWebhook = async (req, res) => {
     const tx = await Transaction.findOneAndUpdate(
       { bakongRefId },
       {
-        paymentStatus: paymentStatus || 'paid',
+        paymentStatus: paymentStatus || "paid",
         fromAccountId,
         updatedAt: new Date(),
-        paidAt: paymentStatus === 'paid' ? new Date() : null
+        paidAt: paymentStatus === "paid" ? new Date() : null,
       },
       { new: true }
     );
-    if (!tx) return res.status(404).json({ message: 'Transaction not found' });
-    return res.status(200).json({ message: 'Transaction updated', data: tx });
+    if (!tx) return res.status(404).json({ message: "Transaction not found" });
+    return res.status(200).json({ message: "Transaction updated", data: tx });
   } catch (err) {
-    return res.status(500).json({ message: 'Webhook error', error: err.message });
+    return res
+      .status(500)
+      .json({ message: "Webhook error", error: err.message });
   }
 };
 
@@ -218,10 +226,12 @@ exports.updateStatus = async (req, res) => {
       { paymentStatus, updatedAt: new Date() },
       { new: true }
     );
-    if (!tx) return res.status(404).json({ message: 'Transaction not found' });
-    return res.status(200).json({ message: 'Status updated', data: tx });
+    if (!tx) return res.status(404).json({ message: "Transaction not found" });
+    return res.status(200).json({ message: "Status updated", data: tx });
   } catch (err) {
-    return res.status(500).json({ message: 'Update status error', error: err.message });
+    return res
+      .status(500)
+      .json({ message: "Update status error", error: err.message });
   }
 };
 
@@ -234,25 +244,27 @@ exports.updateScanned = async (req, res) => {
       { scannedAt: new Date(), scannerInfo },
       { new: true }
     );
-    if (!tx) return res.status(404).json({ message: 'Transaction not found' });
-    return res.status(200).json({ message: 'Scan recorded', data: tx });
+    if (!tx) return res.status(404).json({ message: "Transaction not found" });
+    return res.status(200).json({ message: "Scan recorded", data: tx });
   } catch (err) {
-    return res.status(500).json({ message: 'Scan update error', error: err.message });
+    return res
+      .status(500)
+      .json({ message: "Scan update error", error: err.message });
   }
 };
-
 
 exports.confirmTransaction = async (req, res) => {
   const userId = req.user._id;
   const trx = await Transaction.findOne({
     userId,
-    paymentStatus: 'paid'
+    paymentStatus: "paid",
   }).sort({ paidAt: -1 });
 
   if (!trx) {
-    return res.status(400).json({ success: false, message: 'No confirmed payment found.' });
+    return res
+      .status(400)
+      .json({ success: false, message: "No confirmed payment found." });
   }
 
   return res.json({ success: true, data: trx });
 };
-

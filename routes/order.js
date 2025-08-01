@@ -26,4 +26,9 @@ router.get('/list', requireLogin, (req, res, next) => {
   getAllDocs(req, res, next);
 });
 
+router.get('/', requireLogin, (req, res, next) => {
+  req.params.collectionName = 'Order';
+  getAllDocs(req, res, next);
+});
+
 module.exports = router;
