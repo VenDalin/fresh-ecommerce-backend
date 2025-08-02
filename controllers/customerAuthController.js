@@ -40,6 +40,27 @@ const getDisplayFormat = (e164Number) => {
   return e164Number;
 };
 
+// Helper function to get customer permissions
+const getCustomerPermissions = () => {
+  return [
+    'read_product',
+    'read_category',
+    'create_customerorder',
+    'read_customerorder',
+    'update_customerorder',
+    'create_order',
+    'read_order',
+    'read_transaction',
+    'create_transaction',
+    'update_transaction',
+    'update_product',
+    'read_user',           // Permission to read user data
+    'update_user',         // Permission to update user data
+    'read_stock',          // Permission to read stock data
+    'update_stock'         // Permission to update stock
+  ];
+};
+
 exports.register = async (req, res) => {
   try {
     const { phoneNumber, password, resetToken } = req.body;
@@ -94,14 +115,14 @@ exports.register = async (req, res) => {
 
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    // Create new user
+    // Create new user with complete customer permissions
     const user = new User({
       phoneNumber: formattedPhone,
       displayPhoneNumber: displayPhone,
       password: hashedPassword,
       role: 'customer',
       isVerified: true,
-      permissions: ['read_stock'] // Set default permissions
+      permissions: getCustomerPermissions() // Use the comprehensive permissions
     });
 
     await user.save();
@@ -187,10 +208,32 @@ exports.login = async (req, res) => {
       });
     }
 
-    // Ensure customer user has read_stock permission
-    if (user.role === 'customer' && (!user.permissions || !user.permissions.includes('read_stock'))) {
-      if (!user.permissions) user.permissions = [];
-      user.permissions.push('read_stock');
+    // Ensure customer user has all required permissions
+    if (user.role === 'customer') {
+      const requiredPermissions = getCustomerPermissions();
+      let needsUpdate = false;
+      
+      // Check if user has all required permissions
+      if (!user.permissions || user.permissions.length === 0) {
+        user.permissions = requiredPermissions;
+        needsUpdate = true;
+      } else {
+        // Check for missing permissions and add them
+        const missingPermissions = requiredPermissions.filter(
+          permission => !user.permissions.includes(permission)
+        );
+        
+        if (missingPermissions.length > 0) {
+          user.permissions = [...user.permissions, ...missingPermissions];
+          needsUpdate = true;
+        }
+      }
+      
+      // Update user if permissions were modified
+      if (needsUpdate) {
+        await user.save();
+        console.log('Updated customer permissions:', user.permissions);
+      }
     }
     
     const token = jwt.sign(
@@ -469,7 +512,7 @@ exports.verifyOtp = async (req, res) => {
           });
         }
         
-        // Create new user
+        // Create new user with complete customer permissions
         const hashedPassword = await bcrypt.hash(password, 10);
         
         const user = new User({
@@ -478,7 +521,7 @@ exports.verifyOtp = async (req, res) => {
           password: hashedPassword,
           role: 'customer',
           isVerified: true,
-          permissions: ['read_stock']
+          permissions: getCustomerPermissions() // Use the comprehensive permissions
         });
         
         await user.save();
@@ -562,7 +605,6 @@ exports.verifyOtp = async (req, res) => {
   }
 };
 
-// Initiate password reset with phone number (alternative to sendOtp for password reset)
 exports.forgotPassword = async (req, res) => {
   try {
     const { phoneNumber } = req.body;
@@ -574,20 +616,122 @@ exports.forgotPassword = async (req, res) => {
       });
     }
 
-    // Use the sendOtp function for consistency
-    req.body.purpose = 'password_reset';
-    return exports.sendOtp(req, res);
+    // Format phone number to E.164
+    const formattedPhone = formatPhoneNumber(phoneNumber);
+    const displayPhone = getDisplayFormat(formattedPhone);
+    
+    console.log(`Sending password reset OTP to: ${formattedPhone} (display: ${displayPhone})`);
+    
+    // Check if user exists
+    const existingUser = await User.findOne({ 
+      $or: [
+        { phoneNumber: formattedPhone },
+        { displayPhoneNumber: displayPhone }
+      ] 
+    });
+    
+    if (!existingUser) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'No account found with this phone number' 
+      });
+    }
+    
+    try {
+      // Send OTP using Twilio Verify service
+      const verification = await twilioClient.verify.v2
+        .services(verifyServiceSid)
+        .verifications
+        .create({ 
+          to: formattedPhone, 
+          channel: 'sms',
+          locale: 'en'
+        });
+      
+      console.log(`Password reset verification initiated for ${formattedPhone}:`, {
+        sid: verification.sid,
+        status: verification.status,
+        channel: verification.channel
+      });
+      
+      // Create verification ID for tracking
+      const verificationId = jwt.sign(
+        { 
+          phoneNumber: formattedPhone,
+          displayPhoneNumber: displayPhone,
+          purpose: 'password_reset',
+          verificationSid: verification.sid
+        },
+        process.env.JWT_SECRET || 'default_secret',
+        { expiresIn: '10m' }
+      );
+      
+      res.json({ 
+        success: true, 
+        message: 'Password reset code sent successfully',
+        verificationId,
+        // Don't expose these in production
+        ...(process.env.NODE_ENV === 'development' && {
+          debug: {
+            formattedPhone,
+            verificationSid: verification.sid,
+            status: verification.status
+          }
+        })
+      });
+      
+    } catch (twilioError) {
+      console.error('Twilio Verify error for password reset:', {
+        message: twilioError.message,
+        code: twilioError.code,
+        status: twilioError.status
+      });
+      
+      // Handle specific Twilio errors
+      let errorMessage = 'Failed to send password reset code';
+      
+      switch (twilioError.code) {
+        case 60200:
+          errorMessage = 'Invalid phone number format';
+          break;
+        case 60203:
+          errorMessage = 'Phone number is not a valid mobile number';
+          break;
+        case 60205:
+          errorMessage = 'SMS not supported for this phone number';
+          break;
+        case 60212:
+          errorMessage = 'Too many attempts. Please try again later';
+          break;
+        default:
+          if (process.env.NODE_ENV === 'development') {
+            errorMessage = `Twilio error: ${twilioError.message}`;
+          }
+      }
+      
+      return res.status(400).json({ 
+        success: false, 
+        message: errorMessage,
+        error: 'Failed to send OTP via SMS',
+        ...(process.env.NODE_ENV === 'development' && {
+          twilioError: {
+            code: twilioError.code,
+            message: twilioError.message
+          }
+        })
+      });
+    }
     
   } catch (err) {
     console.error('Password reset initiation failed:', err);
     return res.status(500).json({
       success: false,
-      message: 'Failed to initiate password reset'
+      message: 'Failed to initiate password reset',
+      error: err.message
     });
   }
 };
 
-// Verify OTP and update password (combined function)
 exports.verifyPasswordResetOtp = async (req, res) => {
   try {
     const { verificationId, otp, newPassword } = req.body;
@@ -606,35 +750,133 @@ exports.verifyPasswordResetOtp = async (req, res) => {
       });
     }
 
-    // First verify the OTP
-    const verifyResult = await new Promise((resolve) => {
-      const mockReq = { body: { verificationId, otp } };
-      const mockRes = {
-        json: (data) => resolve(data),
-        status: (code) => ({ json: (data) => resolve({ ...data, statusCode: code }) })
-      };
-      exports.verifyOtp(mockReq, mockRes);
-    });
-
-    if (!verifyResult.success) {
-      return res.status(verifyResult.statusCode || 400).json(verifyResult);
+    // Decode the verificationId
+    let decodedToken;
+    try {
+      decodedToken = jwt.verify(verificationId, process.env.JWT_SECRET || 'default_secret');
+    } catch (error) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Invalid or expired verification session' 
+      });
     }
-
-    // If verification successful and we have a resetToken, proceed with password reset
-    if (verifyResult.resetToken) {
-      const resetReq = { 
-        body: { 
-          resetToken: verifyResult.resetToken, 
-          newPassword 
-        } 
-      };
-      return exports.resetPassword(resetReq, res);
+    
+    const { phoneNumber, displayPhoneNumber, purpose } = decodedToken;
+    
+    if (purpose !== 'password_reset') {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Invalid verification session' 
+      });
     }
-
-    return res.status(400).json({
-      success: false,
-      message: 'Invalid verification result'
-    });
+    
+    try {
+      // Verify OTP with Twilio
+      const verificationCheck = await twilioClient.verify.v2
+        .services(verifyServiceSid)
+        .verificationChecks
+        .create({ 
+          to: phoneNumber, 
+          code: otp 
+        });
+      
+      console.log('Password reset verification check result:', {
+        status: verificationCheck.status,
+        valid: verificationCheck.valid
+      });
+      
+      if (verificationCheck.status !== 'approved') {
+        return res.status(400).json({ 
+          success: false, 
+          message: 'Invalid or expired verification code' 
+        });
+      }
+      
+      // Find user
+      const user = await User.findOne({ 
+        $or: [
+          { phoneNumber: phoneNumber },
+          { displayPhoneNumber: displayPhoneNumber }
+        ] 
+      });
+      
+      if (!user) {
+        return res.status(404).json({ 
+          success: false, 
+          message: 'User not found' 
+        });
+      }
+      
+      // Update password
+      const hashedPassword = await bcrypt.hash(newPassword, 10);
+      user.password = hashedPassword;
+      
+      // Ensure customer has all required permissions after password reset
+      if (user.role === 'customer') {
+        const requiredPermissions = getCustomerPermissions();
+        
+        // Check if user has all required permissions
+        if (!user.permissions || user.permissions.length === 0) {
+          user.permissions = requiredPermissions;
+        } else {
+          // Check for missing permissions and add them
+          const missingPermissions = requiredPermissions.filter(
+            permission => !user.permissions.includes(permission)
+          );
+          
+          if (missingPermissions.length > 0) {
+            user.permissions = [...user.permissions, ...missingPermissions];
+          }
+        }
+      }
+      
+      // Generate new authentication token
+      const token = jwt.sign(
+        { _id: user._id, role: user.role, permissions: user.permissions },
+        process.env.JWT_SECRET || 'default_secret',
+        { expiresIn: '30d' }
+      );
+      
+      user.token = token;
+      await user.save();
+      
+      res.json({ 
+        success: true, 
+        message: 'Password reset successfully',
+        token,
+        user: {
+          _id: user._id,
+          name: user.name,
+          displayPhoneNumber: user.displayPhoneNumber,
+          role: user.role,
+          isVerified: user.isVerified,
+          permissions: user.permissions
+        }
+      });
+      
+    } catch (twilioError) {
+      console.error('Password reset verification check error:', twilioError);
+      
+      let errorMessage = 'Failed to verify code';
+      
+      switch (twilioError.code) {
+        case 20404:
+          errorMessage = 'Verification code has expired or is invalid';
+          break;
+        case 60202:
+          errorMessage = 'Maximum check attempts reached';
+          break;
+        default:
+          if (process.env.NODE_ENV === 'development') {
+            errorMessage = `Twilio error: ${twilioError.message}`;
+          }
+      }
+      
+      return res.status(400).json({ 
+        success: false, 
+        message: errorMessage
+      });
+    }
 
   } catch (err) {
     console.error('Password reset verification failed:', err);
@@ -702,13 +944,33 @@ exports.resetPassword = async (req, res) => {
     // Update password
     const hashedPassword = await bcrypt.hash(newPassword, 10);
     user.password = hashedPassword;
+    
+    // Ensure customer has all required permissions after password reset
+    if (user.role === 'customer') {
+      const requiredPermissions = getCustomerPermissions();
+      
+      // Check if user has all required permissions
+      if (!user.permissions || user.permissions.length === 0) {
+        user.permissions = requiredPermissions;
+      } else {
+        // Check for missing permissions and add them
+        const missingPermissions = requiredPermissions.filter(
+          permission => !user.permissions.includes(permission)
+        );
+        
+        if (missingPermissions.length > 0) {
+          user.permissions = [...user.permissions, ...missingPermissions];
+        }
+      }
+    }
+    
     await user.save();
     
     // Generate new authentication token
     const token = jwt.sign(
       { _id: user._id, role: user.role, permissions: user.permissions },
       process.env.JWT_SECRET || 'default_secret',
-      { expiresIn: '7d' }
+      { expiresIn: '30d' }
     );
     
     user.token = token;

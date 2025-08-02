@@ -25,7 +25,6 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads'))); // Serve u
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/public', require('./routes/publicRoute'));
 app.use('/api/customer-auth', require('./routes/customerAuth'));
-app.use('/api/phone', require('./routes/passwordReset'));
 app.use(geocodeRoute);
 
 // Protected Routes
